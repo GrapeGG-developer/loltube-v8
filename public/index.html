@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>ЛОЛ ТУБ v2</title>
+  <meta name="theme-color" content="#7c3aed">
+  <link rel="stylesheet" href="./style.css?v=8.7">
+  <script src="./config.js?v=6.8"></script>
+  <script src="./localmode.js?v=1.2"></script>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' fill='black'/><text x='50%' y='55%' dominant-baseline='middle' text-anchor='middle' fill='white' font-family='monospace' font-weight='700' font-size='18'>ЛОЛ</text></svg>">
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+  <script src="https://unpkg.com/lucide@latest"></script>
+</head>
+<body>
+  <div class="gradient-bg"></div>
+
+  <header class="topbar">
+    <div class="topbar-left" onclick="app.navigate('home')">
+      <div class="logo">
+        <span class="logo-lol">ЛОЛ</span><span class="logo-tube">ТУБ</span>
+        <span class="version-badge">v2</span>
+      </div>
+    </div>
+    <a class="hub-pill hub-top" href="https://grapegg-developer.github.io/RoboBattle-Web/" target="_blank" rel="noopener">GRAPESCRIPT HUB ↗</a>
+    <div class="topbar-right">
+      <button id="notifBtn" class="top-notif-btn" onclick="app.toggleNotifPanel()" title="Уведомления">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>
+        <span id="notifBadge" class="notif-badge" style="display:none"></span>
+      </button>
+      <button class="top-upload-btn" onclick="app.navigate('upload')" title="Загрузить">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 5v14M5 12h14"/></svg>
+      </button>
+      <button id="accountBtn" class="account-btn" onclick="app.openProfile()">ВОЙТИ</button>
+    </div>
+  </header>
+
+  <div id="scrollProgress" class="scroll-progress"><div id="scrollProgressFill"></div></div>
+  <div id="notifPanel" class="notif-panel" style="display:none"></div>
+
+  <div class="search-bar">
+    <div class="search-input-wrap">
+      <svg class="search-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+      <input id="searchInput" type="text" placeholder="ПОИСК ВИДЕО, АВТОРОВ..." maxlength="50" onkeydown="if(event.key==='Enter') app.doSearch()">
+    </div>
+    <button onclick="app.doSearch()" class="search-btn">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+    </button>
+  </div>
+
+  <main id="app" class="app"></main>
+
+  <nav class="bottom-nav">
+    <button id="navHome" class="active" onclick="app.navigate('home')">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+      <span>ГЛАВНАЯ</span>
+    </button>
+    <button id="navLive" onclick="app.navigate('live')">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="7" width="20" height="15" rx="2" ry="2"/><polyline points="17 2 12 7 7 2"/></svg>
+      <span>ТВ</span>
+    </button>
+    <button id="navFriends" onclick="app.navigate('friends')">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+      <span>ДРУЗЬЯ</span>
+    </button>
+    <button id="navSubs" onclick="app.navigate('subs')">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 3h12"/><path d="M4 7h16"/><rect x="4" y="11" width="16" height="10"/><path d="m10.5 13.5 4 2.5-4 2.5z" fill="currentColor"/></svg>
+      <span>ПОДПИСКИ</span>
+    </button>
+    <button id="navProfile" onclick="app.openProfile()">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+      <span>ПРОФИЛЬ</span>
+    </button>
+  </nav>
+
+  <div id="loginOverlay" class="login-overlay">
+    <div class="login-box">
+      <div class="login-logo">
+        <span class="logo-lol">ЛОЛ</span><span class="logo-tube">ТУБ</span>
+        <span class="version-badge">v2</span>
+      </div>
+      <div class="field">
+        <label>НИК</label>
+        <input id="loginNick" type="text" placeholder="" maxlength="20" autocomplete="off" spellcheck="false">
+      </div>
+      <div class="field">
+        <label>ПИН-КОД • 3 ЦИФРЫ</label>
+        <input id="loginPin" type="text" placeholder="" maxlength="3" inputmode="numeric" autocomplete="off" spellcheck="false">
+      </div>
+      <div id="loginError" class="error" style="display:none"></div>
+      <button id="loginSubmit" class="btn btn-primary btn-block" onclick="app.doLogin()">ВОЙТИ</button>
+      <div class="hub-line"><a class="hub-pill" href="https://grapegg-developer.github.io/RoboBattle-Web/" target="_blank" rel="noopener">GRAPESCRIPT HUB<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M7 17 17 7"/><path d="M8 7h9v9"/></svg></a></div>
+      <button id="testPixel" class="test-pixel" title=""></button>
+      <div id="backendStatus" class="backend-status-icon">
+        <span id="backendDot" class="status-dot checking"></span>
+      </div>
+    </div>
+  </div>
+
+  <input id="avatarInput" type="file" accept="image/*" style="display:none">
+  <input id="bannerInput" type="file" accept="image/*" style="display:none">
+  <script src="./app.js?v=8.7"></script>
+</body>
+</html>
