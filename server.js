@@ -101,8 +101,80 @@ function loadDB() {
 }
 function saveDB(db) {
   fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2));
+  scheduleDBBackup();
 }
 
+// ---------- АВТО-БЭКАП БАЗЫ В CLOUDINARY ----------
+// Render free стирает диск при каждом рестарте/деплое. Чтобы аккаунты и видео-записи
+// не терялись, сервер держит копию db.json в Cloudinary (raw + authenticated:
+// файл недоступен публично, скачивается только по подписи).
+const DB_BACKUP_PUBLIC_ID = 'loltube/db.json';
+const DB_BACKUP_DEBOUNCE_MS = 60000;
+let dbBackupTimer = null;
+let dbBackupBusy = false;
+let lastBackupAt = null;
+let dbRestoreState = 'not_needed'; // not_needed | restored | failed
+
+async function backupDBToCloudinary() {
+  if (!useCloudinary || dbBackupBusy) return;
+  dbBackupBusy = true;
+  try {
+    // защита: не затираем хороший бэкап пустой базой, если при старте восстановление не удалось
+    try {
+      const cur = JSON.parse(fs.readFileSync(DB_PATH, 'utf8'));
+      const empty = (!cur.users || cur.users.length === 0) && (!cur.videos || cur.videos.length === 0);
+      if (empty && dbRestoreState === 'failed') {
+        console.log('DB backup skipped: restore failed + local DB is empty (защита от затирания бэкапа)');
+        return;
+      }
+    } catch {}
+    await cloudinary.uploader.upload(DB_PATH, {
+      resource_type: 'raw',
+      type: 'authenticated',
+      public_id: DB_BACKUP_PUBLIC_ID,
+      overwrite: true,
+      invalidate: true
+    });
+    lastBackupAt = new Date().toISOString();
+    console.log('DB backup -> Cloudinary OK (' + lastBackupAt + ')');
+  } catch (e) {
+    console.error('DB backup failed:', e.message);
+  } finally {
+    dbBackupBusy = false;
+  }
+}
+
+function scheduleDBBackup() {
+  if (!useCloudinary || dbBackupTimer) return;
+  dbBackupTimer = setTimeout(() => {
+    dbBackupTimer = null;
+    backupDBToCloudinary();
+  }, DB_BACKUP_DEBOUNCE_MS);
+}
+
+async function restoreDBFromCloudinary() {
+  if (!useCloudinary) return false;
+  try {
+    const url = cloudinary.utils.private_download_url(DB_BACKUP_PUBLIC_ID, '', {
+      resource_type: 'raw',
+      type: 'authenticated',
+      expires_at: Math.floor(Date.now() / 1000) + 600
+    });
+    const res = await fetch(url);
+    if (!res.ok) { console.log('DB restore: бэкап не найден/недоступен (HTTP ' + res.status + ')'); return false; }
+    const txt = await res.text();
+    const parsed = JSON.parse(txt);
+    if (!parsed || !Array.isArray(parsed.users)) { console.log('DB restore: бэкап повреждён, пропускаю'); return false; }
+    fs.writeFileSync(DB_PATH, txt);
+    console.log('DB restored from Cloudinary: users=' + parsed.users.length + ', videos=' + (parsed.videos ? parsed.videos.length : 0));
+    return true;
+  } catch (e) {
+    console.log('DB restore skipped:', e.message);
+    return false;
+  }
+}
+
+const DB_EXISTED_AT_BOOT = fs.existsSync(DB_PATH);
 let db = loadDB();
 
 // make first user admin
@@ -1117,7 +1189,7 @@ app.get('/api/config', (req, res) => {
     version: '2.0',
     developer: 'https://grapegg-developer.github.io/RoboBattle-Web/',
     features: ['friends','playlists','live','search','themes','admin','history','favorites','chapters','download','loop','screenshot'],
-    storage: { cloudinary: !!useCloudinary, persistent: !!useCloudinary }
+    storage: { cloudinary: !!useCloudinary, persistent: !!useCloudinary, backup: !!useCloudinary, lastBackupAt }
   });
 });
 
@@ -1125,8 +1197,29 @@ app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`LolTube v2 running on http://0.0.0.0:${PORT}`);
-  console.log(`Admin: first user is admin`);
-  console.log(`Live TV-FANTOMAS: POST /api/live with HLS URL (SRT -> convert to HLS via OBS or restream.io)`);
-});
+(async () => {
+  // Render free: диск эфемерный. Файла нет (рестарт/деплой) -> поднимаем базу из Cloudinary.
+  let needRestore = !DB_EXISTED_AT_BOOT;
+  if (!needRestore) {
+    try { JSON.parse(fs.readFileSync(DB_PATH, 'utf8')); }
+    catch { needRestore = true; } // файл повреждён
+  }
+  if (needRestore) {
+    const okRestore = await restoreDBFromCloudinary();
+    dbRestoreState = okRestore ? 'restored' : 'failed';
+    db = loadDB();
+    ensureAdmin();
+  }
+
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`LolTube v2 running on http://0.0.0.0:${PORT}`);
+    console.log(`Admin: first user is admin`);
+    console.log(`Live TV-FANTOMAS: POST /api/live with HLS URL (SRT -> convert to HLS via OBS or restream.io)`);
+    if (useCloudinary) {
+      console.log('DB auto-backup: ENABLED (Cloudinary raw/authenticated, debounce ' + (DB_BACKUP_DEBOUNCE_MS / 1000) + 's, restore state: ' + dbRestoreState + ')');
+      backupDBToCloudinary();
+    } else {
+      console.log('DB auto-backup: DISABLED (нет CLOUDINARY_* env vars)');
+    }
+  });
+})();
