@@ -39,7 +39,7 @@ setInterval(sweep, 10 * 60 * 1000).unref();
 sweep();
 
 module.exports = function glinkRelay(req, res, next) {
-  const m = req.url.match(/^\/glink\/(up|meta|dl|done)\/([a-zA-Z0-9_-]{6,64})/);
+  const m = req.url.match(/^\/glink\/(up|meta|dl|done|prog)\/([a-zA-Z0-9_-]{6,64})/);
   if (!m) return next();
   const op = m[1];
   const file = fileFor(m[2]);
@@ -78,8 +78,27 @@ module.exports = function glinkRelay(req, res, next) {
     return;
   }
 
+  if (op === 'prog') {
+    const progFile = file + '.prog.json';
+    if (req.method === 'POST') {
+      const q = new URL(req.url, 'http://localhost').searchParams;
+      const got = Math.max(0, parseInt(q.get('got') || '0', 10) || 0);
+      const total = Math.max(0, parseInt(q.get('total') || '0', 10) || 0);
+      try { fs.writeFileSync(progFile, JSON.stringify({ got, total })); } catch (e) {}
+      res.setHeader('Content-Type', 'application/json');
+      return res.end(JSON.stringify({ ok: true }));
+    }
+    fs.readFile(progFile, (err, data) => {
+      if (err) { res.statusCode = 404; return res.end('no progress'); }
+      res.setHeader('Content-Type', 'application/json');
+      res.end(data);
+    });
+    return;
+  }
+
   if (op === 'done' && req.method === 'POST') {
     fs.unlink(file, () => {});
+    fs.unlink(file + '.prog.json', () => {});
     res.setHeader('Content-Type', 'application/json');
     return res.end(JSON.stringify({ ok: true }));
   }
