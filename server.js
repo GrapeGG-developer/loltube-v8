@@ -27,6 +27,9 @@ try {
 }
 
 const app = express();
+// GLINK relay: серверная передача файлов приложения GLINK (шифротекст, ключ только у телефонов)
+const glinkRelay = require('./glink-relay');
+app.use(glinkRelay);
 const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || 'loltube-secret-violet-2024-v2';
 const DATA_DIR = path.join(__dirname, 'data');
