@@ -18,6 +18,23 @@ const DIR = process.env.GLINK_RELAY_DIR || path.join(__dirname, 'glink-data');
 const TTL_MS = 60 * 60 * 1000; // 1 час
 try { fs.mkdirSync(DIR, { recursive: true }); } catch (e) {}
 
+function setExpiry(file, hours) {
+  const h = [1, 6, 24].includes(hours) ? hours : 1;
+  try { fs.writeFileSync(file + '.ttl.json', JSON.stringify({ exp: Date.now() + h * 3600 * 1000 })); } catch (e) {}
+}
+function isExpired(file) {
+  try {
+    const t = JSON.parse(fs.readFileSync(file + '.ttl.json', 'utf8'));
+    return t.exp && Date.now() > t.exp;
+  } catch (e) { return false; }
+}
+function purge(file) {
+  try { fs.unlinkSync(file); } catch (e) {}
+  try { fs.unlinkSync(file + '.prog.json'); } catch (e) {}
+  try { fs.unlinkSync(file + '.ttl.json'); } catch (e) {}
+  try { fs.rmSync(file + '.parts', { recursive: true, force: true }); } catch (e) {}
+}
+
 function fileFor(token) {
   if (!/^[a-zA-Z0-9_-]{6,64}$/.test(token)) return null;
   return path.join(DIR, token + '.bin');
@@ -30,7 +47,9 @@ function sweep() {
       const p = path.join(DIR, name);
       try {
         const st = fs.statSync(p);
-        if (now - st.mtimeMs > TTL_MS) fs.unlinkSync(p);
+        const base = name.endsWith('.bin') ? p : null;
+        if (base && isExpired(base)) { purge(base); continue; }
+        if (now - st.mtimeMs > TTL_MS && !name.endsWith('.ttl.json')) fs.unlinkSync(p);
       } catch (e) {}
     }
   } catch (e) {}
@@ -43,7 +62,7 @@ module.exports = function glinkRelay(req, res, next) {
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     return res.end(GLINK_SEND_PAGE);
   }
-  const m = req.url.match(/^\/glink\/(up|meta|dl|done|prog|chunk|chunks|get)\/([a-zA-Z0-9_-]{6,64})/);
+  const m = req.url.match(/^\/glink\/(up|meta|dl|done|prog|chunk|chunks|get|ttl)\/([a-zA-Z0-9_-]{6,64})/);
   if (!m) return next();
   const op = m[1];
   const file = fileFor(m[2]);
@@ -55,6 +74,8 @@ module.exports = function glinkRelay(req, res, next) {
   }
 
   if (op === 'up' && req.method === 'POST') {
+    const ttlH = parseInt(new URL(req.url, 'http://localhost').searchParams.get('ttl') || '1', 10);
+    setExpiry(file, ttlH);
     const tmp = file + '.tmp';
     const out = fs.createWriteStream(tmp);
     req.pipe(out);
@@ -81,6 +102,7 @@ module.exports = function glinkRelay(req, res, next) {
 
   if (op === 'chunk' && req.method === 'POST') {
     const q = new URL(req.url, 'http://localhost').searchParams;
+    if (q.get('ttl')) setExpiry(file, parseInt(q.get('ttl'), 10));
     const idx = parseInt(q.get('i') || '-1', 10);
     const count = parseInt(q.get('n') || '0', 10);
     if (idx < 0 || count <= 0 || idx >= count) { res.statusCode = 400; return res.end('bad chunk'); }
@@ -121,6 +143,19 @@ module.exports = function glinkRelay(req, res, next) {
       });
     });
     return;
+  }
+
+  if (op === 'ttl' && req.method === 'POST') {
+    const h = parseInt(new URL(req.url, 'http://localhost').searchParams.get('h') || '1', 10);
+    setExpiry(file, h);
+    res.setHeader('Content-Type', 'application/json');
+    return res.end(JSON.stringify({ ok: true, hours: [1, 6, 24].includes(h) ? h : 1 }));
+  }
+
+  if ((op === 'meta' || op === 'dl' || op === 'get') && isExpired(file)) {
+    purge(file);
+    res.statusCode = 404;
+    return res.end('expired');
   }
 
   if (op === 'meta') {
@@ -239,7 +274,8 @@ const GLINK_PAGE = '<!doctype html><html lang="ru"><head><meta charset="utf-8">'
 
 
 // ПК-отправитель GLINK: шифрование и заливка прямо из браузера компьютера.
-const GLINK_SEND_PAGE = '<!doctype html><html lang="ru"><head><meta charset="utf-8">' +
+const GLINK_SEND_PAGE = '<script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js"></script>' +
+'<!doctype html><html lang="ru"><head><meta charset="utf-8">' +
 '<meta name="viewport" content="width=device-width,initial-scale=1"><title>GLINK для ПК — отправить на телефон</title>' +
 '<style>body{background:#07060d;color:#e8e6f5;font-family:system-ui,sans-serif;margin:0;padding:24px}' +
 '.card{max-width:620px;margin:5vh auto;background:#12101e;border:1px solid #2c2647;padding:26px}' +
@@ -255,6 +291,7 @@ const GLINK_SEND_PAGE = '<!doctype html><html lang="ru"><head><meta charset="utf
 '<div class="card"><h1><span class="g">GLINK</span> для ПК</h1>' +
 '<div style="color:#a49ec7;font-size:13px">Файлы шифруются прямо на компьютере и заливаются на сервер GrapeScript. Дальше — ссылка: на телефоне её можно открыть в GLINK или скачать файлы в браузере. Живёт 1 час.</div>' +
 '<div id="drop">Перетащите файлы сюда или нажмите, чтобы выбрать<input id="fi" type="file" multiple hidden></div>' +
+'<button id="dirBtn" class="alt" style="width:100%">Или выбрать папку целиком (структура сохранится)</button><input id="fiDir" type="file" webkitdirectory hidden>' +
 '<div id="list"></div>' +
 '<button id="go" style="display:none;width:100%">Зашифровать и загрузить</button>' +
 '<div id="bar" style="display:none"><div id="fill"></div></div>' +
@@ -263,6 +300,8 @@ const GLINK_SEND_PAGE = '<!doctype html><html lang="ru"><head><meta charset="utf
 'let FILES=[];' +
 'const drop=document.getElementById("drop"),fi=document.getElementById("fi"),list=document.getElementById("list"),go=document.getElementById("go"),st=document.getElementById("st"),fill=document.getElementById("fill"),out=document.getElementById("out");' +
 'drop.onclick=()=>fi.click();' +
+'document.getElementById("dirBtn").onclick=()=>document.getElementById("fiDir").click();' +
+'document.getElementById("fiDir").onchange=e=>setFiles(e.target.files);' +
 'drop.ondragover=e=>{e.preventDefault();};' +
 'drop.ondrop=e=>{e.preventDefault();setFiles(e.dataTransfer.files);};' +
 'fi.onchange=()=>setFiles(fi.files);' +
@@ -279,7 +318,7 @@ const GLINK_SEND_PAGE = '<!doctype html><html lang="ru"><head><meta charset="utf
 'try{go.disabled=true;document.getElementById("bar").style.display="block";' +
 'st.textContent="Читаю файлы…";' +
 'const bufs=[];for(const f of FILES)bufs.push(new Uint8Array(await f.arrayBuffer()));' +
-'const man={t:"manifest",from:"Компьютер (GLINK web)",files:FILES.map((f,i)=>({p:f.name,s:bufs[i].length,m:f.type||"application/octet-stream"}))};' +
+'const man={t:"manifest",from:"Компьютер (GLINK web)",files:FILES.map((f,i)=>({p:(f.webkitRelativePath||f.name),s:bufs[i].length,m:f.type||"application/octet-stream"}))};' +
 'const mb=new TextEncoder().encode(JSON.stringify(man));' +
 'const parts=[u32(mb.length),mb];' +
 'FILES.forEach((f,i)=>{parts.push(u64(bufs[i].length));parts.push(bufs[i]);parts.push(u64(crc32(bufs[i])));});' +
@@ -313,5 +352,6 @@ const GLINK_SEND_PAGE = '<!doctype html><html lang="ru"><head><meta charset="utf
 'const b1=document.createElement("button");b1.textContent="Скопировать ссылку";b1.onclick=()=>navigator.clipboard.writeText(dl);out.appendChild(b1);' +
 'const b2=document.createElement("button");b2.className="alt";b2.textContent="Скопировать код для GLINK";b2.onclick=()=>navigator.clipboard.writeText(app);out.appendChild(b2);' +
 'const p=document.createElement("div");p.id="st";p.textContent=dl;out.appendChild(p);' +
+'try{const qr=qrcode(0,"M");qr.addData(app);qr.make();const qd=document.createElement("div");qd.style.marginTop="14px";qd.style.background="#fff";qd.style.padding="10px";qd.style.textAlign="center";qd.innerHTML=qr.createImgTag(4);const cap=document.createElement("div");cap.style.color="#555";cap.style.fontSize="12px";cap.textContent="QR для GLINK: долгий тап по островку в приложении";qd.appendChild(cap);out.appendChild(qd);}catch(e){}' +
 '}catch(e){st.textContent="Ошибка: "+e.message;go.disabled=false;}};' +
 '</' + 'script></body></html>';
