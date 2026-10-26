@@ -39,7 +39,7 @@ setInterval(sweep, 10 * 60 * 1000).unref();
 sweep();
 
 module.exports = function glinkRelay(req, res, next) {
-  const m = req.url.match(/^\/glink\/(up|meta|dl|done|prog)\/([a-zA-Z0-9_-]{6,64})/);
+  const m = req.url.match(/^\/glink\/(up|meta|dl|done|prog|chunk|chunks)\/([a-zA-Z0-9_-]{6,64})/);
   if (!m) return next();
   const op = m[1];
   const file = fileFor(m[2]);
@@ -59,6 +59,61 @@ module.exports = function glinkRelay(req, res, next) {
     return;
   }
 
+  // --- Докачка загрузки: части по 4 МБ, сборка по готовности ---
+  if (op === 'chunks') {
+    const dir = file + '.parts';
+    fs.readdir(dir, (err, names) => {
+      const have = err ? [] : names.filter(n => /^\d+$/.test(n)).map(n => parseInt(n, 10));
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ have }));
+    });
+    return;
+  }
+
+  if (op === 'chunk' && req.method === 'POST') {
+    const q = new URL(req.url, 'http://localhost').searchParams;
+    const idx = parseInt(q.get('i') || '-1', 10);
+    const count = parseInt(q.get('n') || '0', 10);
+    if (idx < 0 || count <= 0 || idx >= count) { res.statusCode = 400; return res.end('bad chunk'); }
+    const dir = file + '.parts';
+    try { fs.mkdirSync(dir, { recursive: true }); } catch (e) {}
+    const part = path.join(dir, String(idx));
+    const out = fs.createWriteStream(part);
+    req.pipe(out);
+    out.on('error', () => { res.statusCode = 500; res.end('write error'); });
+    out.on('finish', () => {
+      fs.readdir(dir, (err, names) => {
+        const have = err ? [] : names.filter(n => /^\d+$/.test(n)).map(n => parseInt(n, 10));
+        if (have.length >= count) {
+          // все части на месте — собираем файл по порядку
+          const finalTmp = file + '.assemble';
+          const ws = fs.createWriteStream(finalTmp);
+          let cur = 0;
+          const pump = () => {
+            if (cur >= count) {
+              ws.end(() => {
+                try { fs.renameSync(finalTmp, file); } catch (e) {}
+                try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) {}
+                res.setHeader('Content-Type', 'application/json');
+                res.end(JSON.stringify({ ok: true, assembled: true }));
+              });
+              return;
+            }
+            const rs = fs.createReadStream(path.join(dir, String(cur++)));
+            rs.on('end', pump);
+            rs.on('error', () => { res.statusCode = 500; res.end('read error'); });
+            rs.pipe(ws, { end: false });
+          };
+          pump();
+        } else {
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ ok: true, have: have.length }));
+        }
+      });
+    });
+    return;
+  }
+
   if (op === 'meta') {
     fs.stat(file, (err, st) => {
       if (err) { res.statusCode = 404; return res.end('not ready'); }
@@ -72,8 +127,21 @@ module.exports = function glinkRelay(req, res, next) {
     fs.stat(file, (err, st) => {
       if (err) { res.statusCode = 404; return res.end('not ready'); }
       res.setHeader('Content-Type', 'application/octet-stream');
-      res.setHeader('Content-Length', st.size);
-      fs.createReadStream(file).pipe(res);
+      res.setHeader('Accept-Ranges', 'bytes');
+      const range = req.headers.range;
+      const mm = range && range.match(/^bytes=(\d+)-(\d*)$/);
+      if (mm) {
+        const start = parseInt(mm[1], 10);
+        const end = mm[2] ? Math.min(parseInt(mm[2], 10), st.size - 1) : st.size - 1;
+        if (start > end) { res.statusCode = 416; return res.end(); }
+        res.statusCode = 206;
+        res.setHeader('Content-Range', `bytes ${start}-${end}/${st.size}`);
+        res.setHeader('Content-Length', end - start + 1);
+        fs.createReadStream(file, { start, end }).pipe(res);
+      } else {
+        res.setHeader('Content-Length', st.size);
+        fs.createReadStream(file).pipe(res);
+      }
     });
     return;
   }
@@ -99,6 +167,7 @@ module.exports = function glinkRelay(req, res, next) {
   if (op === 'done' && req.method === 'POST') {
     fs.unlink(file, () => {});
     fs.unlink(file + '.prog.json', () => {});
+    try { fs.rmSync(file + '.parts', { recursive: true, force: true }); } catch (e) {}
     res.setHeader('Content-Type', 'application/json');
     return res.end(JSON.stringify({ ok: true }));
   }
