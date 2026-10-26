@@ -39,11 +39,16 @@ setInterval(sweep, 10 * 60 * 1000).unref();
 sweep();
 
 module.exports = function glinkRelay(req, res, next) {
-  const m = req.url.match(/^\/glink\/(up|meta|dl|done|prog|chunk|chunks)\/([a-zA-Z0-9_-]{6,64})/);
+  const m = req.url.match(/^\/glink\/(up|meta|dl|done|prog|chunk|chunks|get)\/([a-zA-Z0-9_-]{6,64})/);
   if (!m) return next();
   const op = m[1];
   const file = fileFor(m[2]);
   if (!file) { res.statusCode = 400; return res.end('bad token'); }
+
+  if (op === 'get') {
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    return res.end(GLINK_PAGE.replace('__TOKEN__', m[2]));
+  }
 
   if (op === 'up' && req.method === 'POST') {
     const tmp = file + '.tmp';
@@ -174,3 +179,56 @@ module.exports = function glinkRelay(req, res, next) {
 
   return next();
 };
+
+
+// Страница скачивания GLINK: ключ из #-фрагмента, расшифровка прямо в браузере.
+const GLINK_PAGE = '<!doctype html><html lang="ru"><head><meta charset="utf-8">' +
+'<meta name="viewport" content="width=device-width,initial-scale=1"><title>GLINK — файлы для вас</title>' +
+'<style>body{background:#07060d;color:#e8e6f5;font-family:system-ui,sans-serif;margin:0;padding:24px}' +
+'.card{max-width:560px;margin:8vh auto;background:#12101e;border:1px solid #2c2647;padding:24px}' +
+'h1{font-weight:300;font-size:22px;margin:0 0 6px}.g{color:#22e39a}.v{color:#8b5cf6}' +
+'button{background:#22e39a;color:#06130c;border:0;padding:12px 18px;font-size:15px;cursor:pointer;width:100%;margin-top:12px}' +
+'.f{display:flex;justify-content:space-between;gap:10px;padding:8px 0;border-bottom:1px solid #241f3d;font-size:14px}' +
+'#st{color:#a49ec7;font-size:13px;margin-top:10px;white-space:pre-wrap}</style></head><body>' +
+'<div class="card"><h1><span class="g">GLINK</span> · файлы для вас</h1>' +
+'<div style="color:#a49ec7;font-size:13px">Расшифровка происходит прямо в браузере: ключ из ссылки на сервер не уходит. Ссылка живёт до 2 часов.</div>' +
+'<div id="list"></div><div id="st">Загружаю…</div></div>' +
+'<script>' +
+'const TOKEN="__TOKEN__";' +
+'const st=document.getElementById("st"),list=document.getElementById("list");' +
+'function b64u(s){s=s.replace(/-/g,"+").replace(/_/g,"/");while(s.length%4)s+="=";return Uint8Array.from(atob(s),c=>c.charCodeAt(0));}' +
+'async function main(){' +
+'const k=(location.hash.match(/k=([^&]+)/)||[])[1];' +
+'if(!k){st.textContent="В ссылке нет ключа — попросите отправителя прислать ссылку целиком.";return;}' +
+'const keyRaw=b64u(decodeURIComponent(k));' +
+'const r=await fetch("/glink/dl/"+TOKEN);' +
+'if(!r.ok){st.textContent="Файл не найден: ссылка устарела или отправитель отменил передачу.";return;}' +
+'const buf=new Uint8Array(await r.arrayBuffer());' +
+'if(new TextDecoder().decode(buf.slice(0,6))!=="GSENC1"){st.textContent="Формат не распознан.";return;}' +
+'const salt=buf.slice(6,22);let pos=22;const frames=[];' +
+'while(pos<buf.length){const len=new DataView(buf.buffer,buf.byteOffset+pos,4).getUint32(0);frames.push(buf.slice(pos+4,pos+4+len));pos+=4+len;}' +
+'const kd=new Uint8Array(keyRaw.length+salt.length);kd.set(keyRaw);kd.set(salt,keyRaw.length);' +
+'const hash=await crypto.subtle.digest("SHA-256",kd);' +
+'const key=await crypto.subtle.importKey("raw",hash,{name:"AES-GCM"},false,["decrypt"]);' +
+'const parts=[];' +
+'for(const f of frames){const pt=await crypto.subtle.decrypt({name:"AES-GCM",iv:f.slice(0,12)},key,f.slice(12));parts.push(new Uint8Array(pt));}' +
+'let total=0;for(const p of parts)total+=p.length;' +
+'const plain=new Uint8Array(total);let off=0;for(const p of parts){plain.set(p,off);off+=p.length;}' +
+'let q=0;const dv=new DataView(plain.buffer,plain.byteOffset);' +
+'const mlen=dv.getUint32(q);q+=4;' +
+'const man=JSON.parse(new TextDecoder().decode(plain.slice(q,q+mlen)));q+=mlen;' +
+'st.textContent="От: "+(man.from||"GLINK")+". Нажмите файл, чтобы скачать.";' +
+'if(man.text){addText("Текст",man.text);}' +
+'if(man.link){addText("Ссылка",man.link);}' +
+'for(const f of man.files||[]){const size=Number(dv.getBigUint64(q));q+=8;' +
+'const data=plain.slice(q,q+size);q+=size+8;' +
+'addRow(f.p,size,data);}' +
+'}' +
+'function addText(name,val){const d=document.createElement("div");d.className="f";d.innerHTML="<span></span>";d.firstChild.textContent=name+": "+val;list.appendChild(d);}' +
+'function addRow(name,size,data){const d=document.createElement("div");d.className="f";' +
+'const s=document.createElement("span");s.textContent=name+" · "+(size/1048576).toFixed(2)+" МБ";' +
+'const b=document.createElement("button");b.textContent="Скачать";b.style.width="auto";b.style.margin="0";b.style.padding="6px 12px";' +
+'b.onclick=()=>{const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([data]));a.download=(name||"file").split("/").pop();a.click();};' +
+'d.appendChild(s);d.appendChild(b);list.appendChild(d);}' +
+'main().catch(e=>{st.textContent="Не удалось расшифровать: ссылка повреждена или ключ не тот.";});' +
+'</' + 'script></body></html>';
