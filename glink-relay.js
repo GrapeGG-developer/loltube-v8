@@ -39,6 +39,10 @@ setInterval(sweep, 10 * 60 * 1000).unref();
 sweep();
 
 module.exports = function glinkRelay(req, res, next) {
+  if (req.url === '/glink/send' || req.url.startsWith('/glink/send?')) {
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    return res.end(GLINK_SEND_PAGE);
+  }
   const m = req.url.match(/^\/glink\/(up|meta|dl|done|prog|chunk|chunks|get)\/([a-zA-Z0-9_-]{6,64})/);
   if (!m) return next();
   const op = m[1];
@@ -231,4 +235,83 @@ const GLINK_PAGE = '<!doctype html><html lang="ru"><head><meta charset="utf-8">'
 'b.onclick=()=>{const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([data]));a.download=(name||"file").split("/").pop();a.click();};' +
 'd.appendChild(s);d.appendChild(b);list.appendChild(d);}' +
 'main().catch(e=>{st.textContent="Не удалось расшифровать: ссылка повреждена или ключ не тот.";});' +
+'</' + 'script></body></html>';
+
+
+// ПК-отправитель GLINK: шифрование и заливка прямо из браузера компьютера.
+const GLINK_SEND_PAGE = '<!doctype html><html lang="ru"><head><meta charset="utf-8">' +
+'<meta name="viewport" content="width=device-width,initial-scale=1"><title>GLINK для ПК — отправить на телефон</title>' +
+'<style>body{background:#07060d;color:#e8e6f5;font-family:system-ui,sans-serif;margin:0;padding:24px}' +
+'.card{max-width:620px;margin:5vh auto;background:#12101e;border:1px solid #2c2647;padding:26px}' +
+'h1{font-weight:300;font-size:24px;margin:0 0 6px}.g{color:#22e39a}' +
+'#drop{border:1px dashed #4a3f7d;padding:34px;text-align:center;color:#a49ec7;cursor:pointer;margin-top:16px}' +
+'#drop:hover{border-color:#22e39a;color:#e8e6f5}' +
+'button{background:#22e39a;color:#06130c;border:0;padding:12px 18px;font-size:15px;cursor:pointer;margin-top:10px}' +
+'button.alt{background:#2c2647;color:#e8e6f5}' +
+'#bar{height:8px;background:#241f3d;margin-top:14px}#fill{height:100%;width:0;background:linear-gradient(90deg,#8b5cf6,#22e39a)}' +
+'#st{color:#a49ec7;font-size:13px;margin-top:10px;white-space:pre-wrap;word-break:break-all}' +
+'.f{display:flex;justify-content:space-between;padding:7px 0;border-bottom:1px solid #241f3d;font-size:14px}' +
+'a{color:#22e39a}</style></head><body>' +
+'<div class="card"><h1><span class="g">GLINK</span> для ПК</h1>' +
+'<div style="color:#a49ec7;font-size:13px">Файлы шифруются прямо на компьютере и заливаются на сервер GrapeScript. Дальше — ссылка: на телефоне её можно открыть в GLINK или скачать файлы в браузере. Живёт 1 час.</div>' +
+'<div id="drop">Перетащите файлы сюда или нажмите, чтобы выбрать<input id="fi" type="file" multiple hidden></div>' +
+'<div id="list"></div>' +
+'<button id="go" style="display:none;width:100%">Зашифровать и загрузить</button>' +
+'<div id="bar" style="display:none"><div id="fill"></div></div>' +
+'<div id="st"></div><div id="out"></div></div>' +
+'<script>' +
+'let FILES=[];' +
+'const drop=document.getElementById("drop"),fi=document.getElementById("fi"),list=document.getElementById("list"),go=document.getElementById("go"),st=document.getElementById("st"),fill=document.getElementById("fill"),out=document.getElementById("out");' +
+'drop.onclick=()=>fi.click();' +
+'drop.ondragover=e=>{e.preventDefault();};' +
+'drop.ondrop=e=>{e.preventDefault();setFiles(e.dataTransfer.files);};' +
+'fi.onchange=()=>setFiles(fi.files);' +
+'function setFiles(fs){FILES=[...fs];list.innerHTML="";let sum=0;' +
+'for(const f of FILES){sum+=f.size;const d=document.createElement("div");d.className="f";d.innerHTML="<span></span><span></span>";d.children[0].textContent=f.name;d.children[1].textContent=(f.size/1048576).toFixed(2)+" МБ";list.appendChild(d);}' +
+'go.style.display=FILES.length?"block":"none";st.textContent=FILES.length?("Выбрано файлов: "+FILES.length+", всего "+(sum/1048576).toFixed(1)+" МБ"):"";}' +
+'const CRC_T=(()=>{const t=new Int32Array(256);for(let n=0;n<256;n++){let c=n;for(let k=0;k<8;k++)c=c&1?0xEDB88320^(c>>>1):c>>>1;t[n]=c;}return t;})();' +
+'function crc32(u8){let c=-1;for(let i=0;i<u8.length;i++)c=CRC_T[(c^u8[i])&255]^(c>>>8);return (c^-1)>>>0;}' +
+'function u32(n){const b=new Uint8Array(4);new DataView(b.buffer).setUint32(0,n);return b;}' +
+'function u64(n){const b=new Uint8Array(8);new DataView(b.buffer).setBigUint64(0,BigInt(n));return b;}' +
+'function cat(parts){let t=0;for(const p of parts)t+=p.length;const o=new Uint8Array(t);let q=0;for(const p of parts){o.set(p,q);q+=p.length;}return o;}' +
+'function b64u(u8){let s="";for(const b of u8)s+=String.fromCharCode(b);return btoa(s).replace(/\+/g,"-").replace(/\//g,"_");}' +
+'go.onclick=async()=>{' +
+'try{go.disabled=true;document.getElementById("bar").style.display="block";' +
+'st.textContent="Читаю файлы…";' +
+'const bufs=[];for(const f of FILES)bufs.push(new Uint8Array(await f.arrayBuffer()));' +
+'const man={t:"manifest",from:"Компьютер (GLINK web)",files:FILES.map((f,i)=>({p:f.name,s:bufs[i].length,m:f.type||"application/octet-stream"}))};' +
+'const mb=new TextEncoder().encode(JSON.stringify(man));' +
+'const parts=[u32(mb.length),mb];' +
+'FILES.forEach((f,i)=>{parts.push(u64(bufs[i].length));parts.push(bufs[i]);parts.push(u64(crc32(bufs[i])));});' +
+'const plain=cat(parts);' +
+'st.textContent="Шифрую…";' +
+'const keyRaw=crypto.getRandomValues(new Uint8Array(32));' +
+'const sessB=crypto.getRandomValues(new Uint8Array(9));' +
+'const session=[...sessB].map(x=>x.toString(16).padStart(2,"0")).join("");' +
+'const salt=crypto.getRandomValues(new Uint8Array(16));' +
+'const kd=new Uint8Array(48);kd.set(keyRaw);kd.set(salt,32);' +
+'const hash=await crypto.subtle.digest("SHA-256",kd);' +
+'const key=await crypto.subtle.importKey("raw",hash,{name:"AES-GCM"},false,["encrypt"]);' +
+'const CH=65536;const frames=[new TextEncoder().encode("GSENC1"),salt];' +
+'for(let q=0;q<plain.length||q===0;q+=CH){const piece=plain.slice(q,q+CH);' +
+'const iv=crypto.getRandomValues(new Uint8Array(12));' +
+'const ct=new Uint8Array(await crypto.subtle.encrypt({name:"AES-GCM",iv},key,piece));' +
+'frames.push(u32(12+ct.length));frames.push(iv);frames.push(ct);' +
+'if(piece.length===0)break;}' +
+'const enc=cat(frames);' +
+'st.textContent="Загружаю на сервер GrapeScript…";' +
+'const CS=4*1024*1024;const n=Math.max(1,Math.ceil(enc.length/CS));' +
+'for(let i=0;i<n;i++){const part=enc.slice(i*CS,(i+1)*CS);' +
+'const r=await fetch("/glink/chunk/"+session+"?i="+i+"&n="+n,{method:"POST",body:part});' +
+'if(!r.ok)throw new Error("chunk "+i);' +
+'fill.style.width=Math.round((i+1)/n*100)+"%";}' +
+'const keyUrl=b64u(keyRaw);' +
+'const dl=location.origin+"/glink/get/"+session+"#k="+keyUrl;' +
+'const app="glink://receive?s="+session+"&k="+keyUrl;' +
+'st.textContent="Готово! Отправьте ссылку на телефон: в GLINK («Принять по ссылке») или просто откройте в браузере телефона.";' +
+'out.innerHTML="";' +
+'const b1=document.createElement("button");b1.textContent="Скопировать ссылку";b1.onclick=()=>navigator.clipboard.writeText(dl);out.appendChild(b1);' +
+'const b2=document.createElement("button");b2.className="alt";b2.textContent="Скопировать код для GLINK";b2.onclick=()=>navigator.clipboard.writeText(app);out.appendChild(b2);' +
+'const p=document.createElement("div");p.id="st";p.textContent=dl;out.appendChild(p);' +
+'}catch(e){st.textContent="Ошибка: "+e.message;go.disabled=false;}};' +
 '</' + 'script></body></html>';
