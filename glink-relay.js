@@ -15,7 +15,7 @@ const fs = require('fs');
 const path = require('path');
 
 const DIR = process.env.GLINK_RELAY_DIR || path.join(__dirname, 'glink-data');
-const TTL_MS = 2 * 60 * 60 * 1000; // 2 часа
+const TTL_MS = 60 * 60 * 1000; // 1 час
 try { fs.mkdirSync(DIR, { recursive: true }); } catch (e) {}
 
 function fileFor(token) {
@@ -191,7 +191,7 @@ const GLINK_PAGE = '<!doctype html><html lang="ru"><head><meta charset="utf-8">'
 '.f{display:flex;justify-content:space-between;gap:10px;padding:8px 0;border-bottom:1px solid #241f3d;font-size:14px}' +
 '#st{color:#a49ec7;font-size:13px;margin-top:10px;white-space:pre-wrap}</style></head><body>' +
 '<div class="card"><h1><span class="g">GLINK</span> · файлы для вас</h1>' +
-'<div style="color:#a49ec7;font-size:13px">Расшифровка происходит прямо в браузере: ключ из ссылки на сервер не уходит. Ссылка живёт до 2 часов.</div>' +
+'<div style="color:#a49ec7;font-size:13px">Расшифровка происходит прямо в браузере: ключ из ссылки на сервер не уходит. Ссылка живёт до 1 часа.</div>' +
 '<div id="list"></div><div id="st">Загружаю…</div></div>' +
 '<script>' +
 'const TOKEN="__TOKEN__";' +
