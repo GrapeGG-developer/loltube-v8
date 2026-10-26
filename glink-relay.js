@@ -15,7 +15,8 @@ const fs = require('fs');
 const path = require('path');
 
 const DIR = process.env.GLINK_RELAY_DIR || path.join(__dirname, 'glink-data');
-const TTL_MS = 60 * 60 * 1000; // 1 час
+const TTL_MS = 60 * 60 * 1000;
+const ASSEMBLING = new Set(); // 1 час
 try { fs.mkdirSync(DIR, { recursive: true }); } catch (e) {}
 
 function setExpiry(file, hours) {
@@ -108,14 +109,20 @@ module.exports = function glinkRelay(req, res, next) {
     if (idx < 0 || count <= 0 || idx >= count) { res.statusCode = 400; return res.end('bad chunk'); }
     const dir = file + '.parts';
     try { fs.mkdirSync(dir, { recursive: true }); } catch (e) {}
-    const part = path.join(dir, String(idx));
+    // АТОМАРНО: пишем во временное имя, публикуем часть только rename'ом,
+    // иначе параллельная сборка хватала недописанные части и файл был битым
+    const part = path.join(dir, String(idx) + '.tmp-' + Math.random().toString(36).slice(2, 9));
     const out = fs.createWriteStream(part);
     req.pipe(out);
     out.on('error', () => { res.statusCode = 500; res.end('write error'); });
     out.on('finish', () => {
+      try { fs.renameSync(part, path.join(dir, String(idx))); } catch (e) {}
       fs.readdir(dir, (err, names) => {
         const have = err ? [] : names.filter(n => /^\d+$/.test(n)).map(n => parseInt(n, 10));
-        if (have.length >= count) {
+        const allHere = have.length >= count
+          && Array.from({ length: count }, (_, i) => i).every(i => have.includes(i));
+        if (allHere && !ASSEMBLING.has(file)) {
+          ASSEMBLING.add(file);
           // все части на месте — собираем файл по порядку
           const finalTmp = file + '.assemble';
           const ws = fs.createWriteStream(finalTmp);
@@ -123,6 +130,7 @@ module.exports = function glinkRelay(req, res, next) {
           const pump = () => {
             if (cur >= count) {
               ws.end(() => {
+                ASSEMBLING.delete(file);
                 try { fs.renameSync(finalTmp, file); } catch (e) {}
                 try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) {}
                 res.setHeader('Content-Type', 'application/json');
@@ -132,7 +140,7 @@ module.exports = function glinkRelay(req, res, next) {
             }
             const rs = fs.createReadStream(path.join(dir, String(cur++)));
             rs.on('end', pump);
-            rs.on('error', () => { res.statusCode = 500; res.end('read error'); });
+            rs.on('error', () => { ASSEMBLING.delete(file); res.statusCode = 500; res.end('read error'); });
             rs.pipe(ws, { end: false });
           };
           pump();
