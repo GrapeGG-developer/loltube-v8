@@ -58,7 +58,70 @@ function sweep() {
 setInterval(sweep, 10 * 60 * 1000).unref();
 sweep();
 
+// --- Wi-Fi передача: присутствие устройств и предложения (без QR и ссылок) ---
+const DEVICES = new Map(); // id -> {name, ts}
+const OFFERS = new Map();  // deviceId -> [{s,k,from,ts}]
+
+function readBody(req, cb) {
+  let b = '';
+  req.on('data', c => { b += c; if (b.length > 65536) req.destroy(); });
+  req.on('end', () => { try { cb(JSON.parse(b || '{}')); } catch (e) { cb({}); } });
+}
+function jsonRes(res, obj) {
+  res.setHeader('Content-Type', 'application/json');
+  res.end(JSON.stringify(obj));
+}
+
 module.exports = function glinkRelay(req, res, next) {
+  // присутствие: телефон/ПК объявляет себя в сети
+  if (req.url === '/glink/presence' && req.method === 'POST') {
+    readBody(req, o => {
+      const id = String(o.id || '').slice(0, 64);
+      if (!id) { res.statusCode = 400; return res.end('bad id'); }
+      DEVICES.set(id, { name: String(o.name || 'Устройство').slice(0, 60), ts: Date.now() });
+      jsonRes(res, { ok: true });
+    });
+    return;
+  }
+  if (req.url.startsWith('/glink/devices')) {
+    const me = new URL(req.url, 'http://localhost').searchParams.get('me') || '';
+    const now = Date.now();
+    const list = [];
+    for (const [id, d] of DEVICES) {
+      if (now - d.ts > 90000) { DEVICES.delete(id); continue; }
+      if (id !== me) list.push({ id, name: d.name });
+    }
+    return jsonRes(res, { devices: list });
+  }
+  // предложение передачи конкретному устройству
+  if (req.url === '/glink/offer' && req.method === 'POST') {
+    readBody(req, o => {
+      const to = String(o.to || '').slice(0, 64);
+      const s = String(o.s || '');
+      const k = String(o.k || '');
+      if (!to || !/^[a-zA-Z0-9_-]{6,64}$/.test(s) || !k) { res.statusCode = 400; return res.end('bad offer'); }
+      const arr = OFFERS.get(to) || [];
+      arr.push({ s, k, from: String(o.from || 'Устройство').slice(0, 60), ts: Date.now() });
+      OFFERS.set(to, arr.slice(-5));
+      jsonRes(res, { ok: true });
+    });
+    return;
+  }
+  if (req.url.startsWith('/glink/offers/')) {
+    const id = req.url.slice('/glink/offers/'.length).split('?')[0].slice(0, 64);
+    const now = Date.now();
+    const arr = (OFFERS.get(id) || []).filter(o => now - o.ts < 15 * 60 * 1000);
+    OFFERS.set(id, arr);
+    return jsonRes(res, { offers: arr });
+  }
+  if (req.url === '/glink/offer-ack' && req.method === 'POST') {
+    readBody(req, o => {
+      const arr = (OFFERS.get(String(o.to || '')) || []).filter(x => x.s !== String(o.s || ''));
+      OFFERS.set(String(o.to || ''), arr);
+      jsonRes(res, { ok: true });
+    });
+    return;
+  }
   if (req.url === '/glink/send' || req.url.startsWith('/glink/send?')) {
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     return res.end(GLINK_SEND_PAGE);
@@ -282,8 +345,7 @@ const GLINK_PAGE = '<!doctype html><html lang="ru"><head><meta charset="utf-8">'
 
 
 // ПК-отправитель GLINK: шифрование и заливка прямо из браузера компьютера.
-const GLINK_SEND_PAGE = '<script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js"></script>' +
-'<!doctype html><html lang="ru"><head><meta charset="utf-8">' +
+const GLINK_SEND_PAGE = '<!doctype html><html lang="ru"><head><meta charset="utf-8">' +
 '<meta name="viewport" content="width=device-width,initial-scale=1"><title>GLINK для ПК — отправить на телефон</title>' +
 '<style>body{background:#07060d;color:#e8e6f5;font-family:system-ui,sans-serif;margin:0;padding:24px}' +
 '.card{max-width:620px;margin:5vh auto;background:#12101e;border:1px solid #2c2647;padding:26px}' +
@@ -352,14 +414,14 @@ const GLINK_SEND_PAGE = '<script src="https://cdn.jsdelivr.net/npm/qrcode-genera
 'const r=await fetch("/glink/chunk/"+session+"?i="+i+"&n="+n,{method:"POST",body:part});' +
 'if(!r.ok)throw new Error("chunk "+i);' +
 'fill.style.width=Math.round((i+1)/n*100)+"%";}' +
+'const PCID=localStorage.getItem("glinkPcId")||("pc-"+Math.random().toString(36).slice(2,10));localStorage.setItem("glinkPcId",PCID);' +
+'fetch("/glink/presence",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id:PCID,name:"Компьютер (браузер)"})});' +
+'setInterval(()=>{fetch("/glink/offers/"+PCID).then(r=>r.json()).then(j=>{for(const o of j.offers||[]){const d=document.createElement("div");d.style.marginTop="14px";d.innerHTML="<b>Входящая передача от "+o.from+"</b>";const a=document.createElement("button");a.textContent="Скачать файлы";a.onclick=()=>{location.href="/glink/get/"+o.s+"#k="+o.k;};d.appendChild(a);out.appendChild(d);fetch("/glink/offer-ack",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({to:PCID,s:o.s})});}}).catch(()=>{});},6000);' +
 'const keyUrl=b64u(keyRaw);' +
 'const dl=location.origin+"/glink/get/"+session+"#k="+keyUrl;' +
 'const app="glink://receive?s="+session+"&k="+keyUrl;' +
-'st.textContent="Готово! Отправьте ссылку на телефон: в GLINK («Принять по ссылке») или просто откройте в браузере телефона.";' +
+'st.textContent="Готово! Выберите телефон по Wi-Fi:";' +
 'out.innerHTML="";' +
-'const b1=document.createElement("button");b1.textContent="Скопировать ссылку";b1.onclick=()=>navigator.clipboard.writeText(dl);out.appendChild(b1);' +
-'const b2=document.createElement("button");b2.className="alt";b2.textContent="Скопировать код для GLINK";b2.onclick=()=>navigator.clipboard.writeText(app);out.appendChild(b2);' +
-'const p=document.createElement("div");p.id="st";p.textContent=dl;out.appendChild(p);' +
-'try{const qr=qrcode(0,"M");qr.addData(app);qr.make();const qd=document.createElement("div");qd.style.marginTop="14px";qd.style.background="#fff";qd.style.padding="10px";qd.style.textAlign="center";qd.innerHTML=qr.createImgTag(4);const cap=document.createElement("div");cap.style.color="#555";cap.style.fontSize="12px";cap.textContent="QR для GLINK: долгий тап по островку в приложении";qd.appendChild(cap);out.appendChild(qd);}catch(e){}' +
+'fetch("/glink/devices?me="+PCID).then(r=>r.json()).then(j=>{const ds=j.devices||[];if(!ds.length){st.textContent="Файл загружен, но телефонов рядом не видно. Откройте GLINK на телефоне и подождите несколько секунд.";return;}for(const dv of ds){const b=document.createElement("button");b.textContent="Отправить на "+dv.name;b.onclick=()=>{fetch("/glink/offer",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({to:dv.id,s:session,k:keyUrl,from:"Компьютер"})}).then(()=>{st.textContent="Отправлено на "+dv.name+" — подтвердите приём на телефоне.";});};out.appendChild(b);}});' +
 '}catch(e){st.textContent="Ошибка: "+e.message;go.disabled=false;}};' +
 '</' + 'script></body></html>';
