@@ -27,7 +27,11 @@ try {
 }
 
 const app = express();
-// GLINK relay: серверная передача файлов приложения GLINK (шифротекст, ключ только у телефонов)
+// GSERVER: staging preserves the existing GLINK relay while the PC tunnel is tested.
+// No live traffic moves until a separate activation commit; LOLTUBE routes remain.
+const gserverGateway = require('./gserver/tunnel-gateway').createTunnelGateway();
+app.use(gserverGateway.handler);
+// Existing GLINK relay continues to serve normal traffic in staging mode.
 const glinkRelay = require('./glink-relay');
 app.use(glinkRelay);
 const PORT = process.env.PORT || 3000;
@@ -1214,7 +1218,7 @@ app.get('*', (req, res) => {
     ensureAdmin();
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`LolTube v2 running on http://0.0.0.0:${PORT}`);
     console.log(`Admin: first user is admin`);
     console.log(`Live TV-FANTOMAS: POST /api/live with HLS URL (SRT -> convert to HLS via OBS or restream.io)`);
@@ -1224,5 +1228,8 @@ app.get('*', (req, res) => {
     } else {
       console.log('DB auto-backup: DISABLED (нет CLOUDINARY_* env vars)');
     }
+  });
+  server.on('upgrade', (req, socket, head) => {
+    if (!gserverGateway.handleUpgrade(req, socket, head)) socket.destroy();
   });
 })();
