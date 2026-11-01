@@ -27,9 +27,9 @@ try {
 }
 
 const app = express();
-// GSERVER: staging preserves the existing GLINK relay while the PC tunnel is tested.
-// No live traffic moves until a separate activation commit; LOLTUBE routes remain.
-const gserverGateway = require('./gserver/tunnel-gateway').createTunnelGateway();
+// GSERVER compatibility: versioned clients and legacy file bodies use the PC.
+// Legacy Wi-Fi discovery remains separate on Render; no offline file fallback.
+const gserverGateway = require('./gserver/tunnel-gateway').createTunnelGateway({ versioned: true, legacyFilesOnPc: true });
 app.use(gserverGateway.handler);
 // Existing GLINK relay continues to serve normal traffic in staging mode.
 const glinkRelay = require('./glink-relay');

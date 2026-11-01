@@ -48,8 +48,9 @@ function reject(socket, status = '503 Service Unavailable') {
   if (!socket.destroyed) { socket.end('HTTP/1.1 ' + status + '\r\nConnection: close\r\nContent-Length: 0\r\n\r\n'); }
 }
 // Start in staging: keep the existing GLINK relay untouched while the owner
-// starts and tests the PC. Activate only in a reviewed follow-up commit.
-function createTunnelGateway({ getPin = readPublicPin, maxStreams = 64, active = false } = {}) {
+// starts and tests the PC. A separate, opt-in versioned namespace lets updated
+// clients exercise the PC without silently redirecting legacy traffic.
+function createTunnelGateway({ getPin = readPublicPin, maxStreams = 64, active = false, versioned = false, legacyFilesOnPc = false } = {}) {
   let session = null, pendingAuth = 0, closed = false;
   const wss = new WebSocketServer({ noServer: true, perMessageDeflate: false, maxPayload: MAX_FRAME });
   const tcp = net.createServer({ allowHalfOpen: true }, socket => {
@@ -79,14 +80,46 @@ function createTunnelGateway({ getPin = readPublicPin, maxStreams = 64, active =
     if (p !== prefix + '/glink/devices' && p !== prefix + '/gplus/me') return '';
     const q = raw.indexOf('?'); return p.slice(prefix.length) + (q < 0 ? '' : raw.slice(q));
   }
+  function versionedTarget(raw) {
+    const p = cleanPath(raw), prefix = '/gsrv-v1';
+    if (!p.startsWith(prefix + '/')) return '';
+    const target = p.slice(prefix.length);
+    if (!(target === '/glink' || target.startsWith('/glink/') || target === '/gplus' || target.startsWith('/gplus/'))) return '';
+    const q = raw.indexOf('?'); return target + (q < 0 ? '' : raw.slice(q));
+  }
   function handler(req, res, next) {
-    const p = cleanPath(req.url), target = preview(req.url);
+    const p = cleanPath(req.url), target = preview(req.url), vTarget = versionedTarget(req.url);
+    // Report the actual storage writer used by versioned clients, not the
+    // legacy GLINK-S status. A connected writer reports its own maintenance
+    // state; an offline tunnel never silently falls back to Render storage.
+    if (p === '/gsrv-v1/gserver/status' && req.method === 'GET') {
+      if (!versioned) return json(res, 404, { error: 'not_found' });
+      if (!session || !port()) return json(res, 200, { mode: 'GSERVER', state: 'unavailable' });
+      return proxy(req, res, '/gserver/status');
+    }
+    if (vTarget) return versioned ? proxy(req, res, vTarget) : json(res, 404, { error: 'not_found' });
+    if (p === '/gsrv-v1' || p.startsWith('/gsrv-v1/')) return json(res, 404, { error: 'not_found' });
+    // Optional, separately activated compatibility bridge: keep the old Wi-Fi
+    // directory on the legacy service while storing opaque transfer bodies on
+    // the same PC as v2 clients. This does NOT make legacy Wi-Fi discovery
+    // secure or compatible with v2, and never migrates pre-existing files.
+    // Existing transfers must finish or be recovered before enabling it.
+    if (!active && legacyFilesOnPc && /^\/glink\/(?:up|meta|dl|done|prog|chunk|chunks|ttl)\/[A-Za-z0-9_-]{6,64}$/.test(p))
+      return proxy(req, res);
+    if (!active && legacyFilesOnPc && /^\/glink\/get\/[A-Za-z0-9_-]{6,64}$/.test(p))
+      return json(res, 410, { error: 'public_links_disabled' });
     if (target) return active || req.method !== 'GET' ? json(res, 404, { error: 'not_found' }) : proxy(req, res, target);
     if (p === '/gserver-preview' || p.startsWith('/gserver-preview/')) return json(res, 404, { error: 'not_found' });
     if (!managed(req.url)) return typeof next === 'function' ? next() : json(res, 404, { error: 'not_found' });
-    if (p === '/gserver/status' && req.method === 'GET') return active
-      ? json(res, 200, { mode: 'GSERVER', state: session ? 'online' : 'unavailable', stage: 'active' })
-      : json(res, 200, { mode: 'GLINK-S', state: 'online', stage: 'staging', gserver: session ? 'online' : 'unavailable' });
+    if (p === '/gserver/status' && req.method === 'GET') {
+      if (!active && legacyFilesOnPc) {
+        if (!session || !port()) return json(res, 200, { mode: 'GSERVER', state: 'unavailable', stage: 'compatibility', legacyDiscovery: 'GLINK-S' });
+        return proxy(req, res, '/gserver/status');
+      }
+      return active
+        ? json(res, 200, { mode: 'GSERVER', state: session ? 'online' : 'unavailable', stage: 'active' })
+        : json(res, 200, { mode: 'GLINK-S', state: 'online', stage: 'staging', gserver: session ? 'online' : 'unavailable' });
+    }
     if (p === '/gserver/tunnel' || p === '/gserver-admin' || p.startsWith('/gserver-admin/')) return json(res, 404, { error: 'not_found' });
     if (!active && (p === '/glink' || p.startsWith('/glink/'))) return typeof next === 'function' ? next() : json(res, 404, { error: 'not_found' });
     if (!active) return json(res, 503, { error: 'gserver_staging' });
@@ -136,6 +169,12 @@ function createTunnelGateway({ getPin = readPublicPin, maxStreams = 64, active =
   function handleUpgrade(req, socket, head) {
     const p = cleanPath(req.url);
     if (p === '/gserver/tunnel') { acceptTunnel(req, socket, head); return true; }
+    if (p === '/gsrv-v1/gplus/call-relay') {
+      if (versioned) proxyUpgrade(req, socket, head, versionedTarget(req.url));
+      else reject(socket, '404 Not Found');
+      return true;
+    }
+    if (p === '/gsrv-v1' || p.startsWith('/gsrv-v1/')) { reject(socket, '404 Not Found'); return true; }
     if (p === '/gplus/call-relay') { if (active) proxyUpgrade(req, socket, head); else reject(socket); return true; }
     if (p === '/gserver-preview' || p.startsWith('/gserver-preview/')) { reject(socket, '404 Not Found'); return true; }
     return false;
