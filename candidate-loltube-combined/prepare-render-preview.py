@@ -7,12 +7,14 @@ prefix. The experiment's preview key is read from Render environment at runtime,
 never written to this bundle. No real LOLTUBE backup is read or overwritten.
 """
 from pathlib import Path
-import hashlib, json, shutil, subprocess
+import argparse, hashlib, json, shutil, subprocess
 
 repo = Path(__file__).resolve().parent.parent
 upstream = Path('/var/tmp/loltube-combined-base')
 lockdir = repo/'loltube-combined'
-out = Path('/var/tmp/loltube-render-bundle')
+parser=argparse.ArgumentParser()
+parser.add_argument('--output',choices=['/var/tmp/loltube-render-bundle','/var/tmp/loltube-render-cutover-preview'],default='/var/tmp/loltube-render-bundle')
+out = Path(parser.parse_args().output)
 if hashlib.sha256((upstream/'server.js').read_bytes()).hexdigest() != '462dc1ab2e7117dfe93ac6085f6e0390b5e8cd74efd06f83d14c1916a1c038b9':
     raise SystemExit('unexpected upstream')
 if out.exists(): shutil.rmtree(out)
