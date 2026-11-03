@@ -18,6 +18,9 @@ async function createCloudGPlus({store,dataDir,onFatal=()=>{},maxStorageBytes=5*
  async function cleanupOnce(){
   if(gcTask)return {busy:true};
   gcTask=gateway.maintenance(async checkpoint=>{
+   // The app's normal timer is frozen; expiry must also be serialized and
+   // checkpointed, or old message rows would accumulate indefinitely.
+   if(app.purgeExpiredMessages())await checkpoint();
    const id=app.prepareCloudDeletion();if(!id)return {removed:false};
    await checkpoint(); // durable 'deleting' before any cloud object is removed
    await media.remove(id);await app.finishCloudDeletion(id);await checkpoint();

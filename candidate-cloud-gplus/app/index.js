@@ -23,7 +23,7 @@ function createGPlus({dataDir,maxStorageBytes=0,reserveBytes=0,restoreAsset=null
  };
  handler.pendingOperations=()=>activeOperations+assets.pendingWrites();
  handler.setFrozen=value=>{sweepSuspended=!!value;};
- handler.purgeDelivered=()=>assets.purgeDelivered();
+ handler.purgeDelivered=()=>assets.purgeDelivered();handler.purgeExpiredMessages=()=>messages.purgeExpired();
  handler.prepareCloudDeletion=()=>assets.prepareCloudDeletion();handler.finishCloudDeletion=id=>assets.finishCloudDeletion(id);
  handler.handleUpgrade=calls.handleUpgrade;handler.closeCalls=()=>calls.close();
  handler.close=()=>{clearInterval(sweep);calls.close();assets.close();messages.close();};return handler;
