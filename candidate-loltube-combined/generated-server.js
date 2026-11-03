@@ -1165,4 +1165,4 @@ app.get('*', (req, res) => {
       if (!gserverGateway.handleUpgrade(req, socket, head)) socket.destroy();
     } catch (_) { socket.destroy(); }
   });
-})().catch(() => { console.error('Verified LOLTUBE backup unavailable; refusing to start'); process.exitCode = 1; });
+})().catch(() => { console.error('Verified LOLTUBE backup unavailable; refusing to start'); try { gserverGateway.close(); } catch (_) {} process.exit(1); });
