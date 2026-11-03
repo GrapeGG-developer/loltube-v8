@@ -1,0 +1,16 @@
+{
+  "name": "grapescript-gplus-cloud-experimental",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Experimental, non-production G+ Cloudinary persistence research",
+  "engines": { "node": ">=22 <27" },
+  "scripts": {
+    "start": "node serve-experimental.js",
+    "test": "node --test *.test.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "12.11.1",
+    "cloudinary": "2.11.0",
+    "ws": "8.22.1"
+  }
+}
