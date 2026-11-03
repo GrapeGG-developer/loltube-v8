@@ -15,6 +15,7 @@ const fake = {
       if (flag('fail-write')) throw Error('synthetic_write_failure');
       if (opts.resource_type !== 'raw') {
         if (flag('fail-media')) throw Error('synthetic_media_failure');
+        if (flag('delay-media')) { fs.writeFileSync(path.join(root, 'media-started'), '1'); await new Promise(r => setTimeout(r, 1500)); }
         return { secure_url: 'https://synthetic-media.invalid/' + crypto.randomBytes(12).toString('hex') };
       }
       const b = typeof source === 'string' && source.startsWith('data:') ? Buffer.from(source.split(',')[1], 'base64') : fs.readFileSync(source);

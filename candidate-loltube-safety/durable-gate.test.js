@@ -1,9 +1,9 @@
 'use strict';
 const {test}=require('node:test'),assert=require('node:assert/strict'),http=require('node:http');
 const {createDurableGate}=require('./durable-gate');
-async function server({commit,delay}={}){
+async function server({commit,delay,preflight}={}){
  let state=0,fatals=0,stored=0,commits=0;
- const gate=createDurableGate({snapshot:async()=>Buffer.from(String(state)),commit:async b=>{commits++;if(delay)await delay();if(commit)await commit(b);stored=Number(b.toString());},onFatal:()=>fatals++});
+ const gate=createDurableGate({snapshot:async()=>Buffer.from(String(state)),commit:async b=>{commits++;if(delay)await delay();if(commit)await commit(b);stored=Number(b.toString());},...(preflight?{preflight}:{}),onFatal:()=>fatals++});
  const s=http.createServer((req,res)=>gate(req,res,()=>{
   if(req.url==='/mutate'){state++;gate.markMutation();res.writeHead(200,{'content-type':'text/plain','content-length':2});res.end('ok');}
   else{res.writeHead(200,{'content-type':'text/plain'});res.end(String(state));}

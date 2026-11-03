@@ -3,8 +3,8 @@
  * integrated with fail-closed boot, no-overlap cutover and real-load testing.
  * All state-mutating /api requests must pass through this serialized gate and
  * call markMutation immediately after the local DB write. */
-function createDurableGate({snapshot,commit,onFatal=()=>{},maxQueue=100}){
- if(typeof snapshot!=='function'||typeof commit!=='function'||typeof onFatal!=='function'||!Number.isInteger(maxQueue)||maxQueue<1)throw Error('invalid_gate');
+function createDurableGate({snapshot,commit,preflight=async()=>{},onFatal=()=>{},maxQueue=100}){
+ if(typeof snapshot!=='function'||typeof commit!=='function'||typeof preflight!=='function'||typeof onFatal!=='function'||!Number.isInteger(maxQueue)||maxQueue<1)throw Error('invalid_gate');
  let tail=Promise.resolve(),queued=0,healthy=true,sequence=0,durable=0;
  function fail(){if(!healthy)return;healthy=false;try{onFatal();}catch{}}
  function unavailable(res){if(res.destroyed||res.writableEnded)return;try{res.statusCode=503;res.removeHeader('Content-Length');res.removeHeader('Content-Type');res.setHeader('Content-Type','application/json');res.setHeader('Cache-Control','no-store');res.end('{"error":"backup_unavailable"}');}catch{try{res.destroy();}catch{}}}
@@ -12,6 +12,8 @@ function createDurableGate({snapshot,commit,onFatal=()=>{},maxQueue=100}){
   if(!healthy||queued>=maxQueue){req.resume();unavailable(res);return;}
   queued++;
   const run=async()=>{
+   if(!healthy||res.destroyed){if(!res.destroyed)unavailable(res);return;}
+   try{await preflight();}catch{unavailable(res);fail();return;}
    if(!healthy||res.destroyed){if(!res.destroyed)unavailable(res);return;}
    await new Promise(resolve=>{
     let begun=false,finished=false;

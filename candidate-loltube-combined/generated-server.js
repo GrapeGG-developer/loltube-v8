@@ -62,18 +62,27 @@ const CONTENT_DIR = path.join(__dirname, 'uploads', 'content'); // images, gif, 
 const DB_PATH = path.join(DATA_DIR, 'db.json');
 const crypto = require('node:crypto'), os = require('node:os');
 const {createDurableGate} = require('./loltube-safety/durable-gate');
-const {commitVerified,requireVerifiedBackup,validate} = require('./loltube-safety/verified-backup');
+const {requireVerifiedBackup,validate} = require('./loltube-safety/verified-backup');
 const {createBackupStore} = require('./loltube-combined/backup-store');
+const {LoltubeLedger} = require('./loltube-combined/ledger-backup');
+const {CloudinaryStore} = require('./gplus-cloud/cloudinary-store');
 if (!useCloudinary || !process.env.JWT_SECRET) throw Error('verified storage and JWT secret required');
 const backupStore = createBackupStore({cloudinary});
-let lastBackupAt = null, dbRestoreState = 'unavailable';
+const durableLedger = new LoltubeLedger(new CloudinaryStore({cloudinary,prefix:'loltube-ledger-v1'}));
+let lastBackupAt = null, dbRestoreState = 'unavailable', committedDb = null;
 const safetyGate = createDurableGate({
   snapshot: async () => fs.readFileSync(DB_PATH),
-  commit: async bytes => { await commitVerified(backupStore, bytes); lastBackupAt = new Date().toISOString(); },
-  onFatal: () => console.error('LOLTUBE durable backup unavailable; API remains fenced')
+  preflight: async () => { if (await durableLedger.changedExternally()) throw Error('ledger_stale'); },
+  commit: async bytes => { await durableLedger.commit(bytes); committedDb = validate(bytes); lastBackupAt = new Date().toISOString(); },
+  onFatal: () => console.error('LOLTUBE durable ledger unavailable; API remains fenced')
 });
-// Keep the host health check available without exposing speculative data.
-app.use('/api', (req, res, next) => req.path === '/config' && req.method === 'GET' ? next() : safetyGate(req, res, next));
+// Keep the health check available. Media bytes are staged before the API gate,
+// then their metadata and response go through that same durable gate.
+app.use('/api', (req, res, next) => {
+  const staged = req.method === 'POST' && ['/me/avatar','/me/banner','/videos/upload'].includes(req.path);
+  if (staged || (req.path === '/config' && req.method === 'GET')) return next();
+  return safetyGate(req, res, next);
+});
 
 function loadDB() {
   if (!fs.existsSync(DB_PATH)) throw Error('verified_backup_required');
@@ -275,6 +284,52 @@ async function uploadToCloudinary(filePath, resourceType='auto') {
   }
 }
 
+// Media can take minutes to arrive from a client and to upload to Cloudinary.
+// Stage it before serializing state changes, then re-authenticate inside the
+// normal gate before saving the reference and acknowledging the request.
+async function preMediaAuth(req,res,next) {
+  if (!safetyGate.isHealthy() || !committedDb) return res.status(503).json({error:'backup_unavailable'});
+  let decoded;
+  try { const token = (req.headers.authorization || '').split(' ')[1] || ''; decoded = jwt.verify(token, JWT_SECRET); }
+  catch (_) { return res.status(401).json({error:'unauthorized'}); }
+  const user = committedDb.users.find(u => u.id === decoded.id);
+  if (!user) return res.status(401).json({error:'unauthorized'});
+  if (user.nickname === 'test_account') return res.status(403).json({error:'upload_forbidden'});
+  try { if (await durableLedger.changedExternally()) return res.status(503).json({error:'backup_unavailable'}); }
+  catch (_) { return res.status(503).json({error:'backup_unavailable'}); }
+  return next();
+}
+function discardMediaTemps(req) {
+  const all = req.file ? [req.file] : Object.values(req.files || {}).flat();
+  for (const file of all) {
+    if (!file || typeof file.path !== 'string') continue;
+    const resolved=path.resolve(file.path), root=path.resolve(UPLOADS_DIR)+path.sep;
+    if (resolved.startsWith(root)) try { fs.unlinkSync(resolved); } catch (_) {}
+  }
+}
+async function stageImage(req,res,next) {
+  if (!req.file) return res.status(400).json({error:'file_required'});
+  req.stagedImage = await uploadToCloudinary(req.file.path,'image');
+  discardMediaTemps(req);
+  if (!req.stagedImage) return res.status(503).json({error:'media_storage_unavailable'});
+  return next();
+}
+async function stageVideo(req,res,next) {
+  const {title,contentType} = req.body || {};
+  if (typeof title !== 'string' || !title.trim()) { discardMediaTemps(req); return res.status(400).json({error:'title_required'}); }
+  const f=req.files || {}, file=f.video?.[0] || f.content?.[0];
+  if (!file) { discardMediaTemps(req); return res.status(400).json({error:'file_required'}); }
+  let type=contentType || 'video';
+  if (!contentType) type=file.mimetype.startsWith('image/') ? (file.mimetype==='image/gif'?'gif':'image') : file.mimetype.startsWith('audio/') ? 'music' : 'video';
+  const thumb=f.thumbnail?.[0] || null, cover=f.cover?.[0] || (type==='artist_music' ? thumb : null);
+  req.stagedVideo=await uploadToCloudinary(file.path,type==='image'||type==='gif'?'image':'video');
+  if (!req.stagedVideo) { discardMediaTemps(req); return res.status(503).json({error:'media_storage_unavailable'}); }
+  req.stagedThumb=null;
+  if (thumb) { req.stagedThumb=await uploadToCloudinary(thumb.path,'image'); if (!req.stagedThumb) { discardMediaTemps(req); return res.status(503).json({error:'media_storage_unavailable'}); } }
+  if (cover && cover!==thumb) { req.stagedThumb=await uploadToCloudinary(cover.path,'image'); if (!req.stagedThumb) { discardMediaTemps(req); return res.status(503).json({error:'media_storage_unavailable'}); } }
+  discardMediaTemps(req); return next();
+}
+
 // Auth
 app.post('/api/login', async (req, res) => {
   const { nickname, password } = req.body;
@@ -467,7 +522,7 @@ app.post('/api/me/change-nickname', authMiddleware, async (req, res) => {
   res.json({ ok: true, old, new: clean, token });
 });
 
-app.post('/api/me/avatar', authMiddleware, upload.single('avatar'), async (req, res) => {
+app.post('/api/me/avatar', preMediaAuth, upload.single('avatar'), stageImage, safetyGate, authMiddleware, async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'Файл не загружен' });
   db = loadDB();
   const user = db.users.find(u => u.id === req.user.id);
@@ -476,10 +531,7 @@ app.post('/api/me/avatar', authMiddleware, upload.single('avatar'), async (req, 
     try { fs.unlinkSync(path.join(AVATARS_DIR, req.file.filename)); } catch {}
     return res.status(403).json({ error: 'Тестовый аккаунт не может менять аватарку' });
   }
-  let avatarUrl = null;
-  if (useCloudinary) {
-    avatarUrl = await uploadToCloudinary(req.file.path, 'image');
-  }
+  const avatarUrl = req.stagedImage;
   if (!avatarUrl) { try { fs.unlinkSync(req.file.path); } catch (_) {} return res.status(503).json({error:'media_storage_unavailable'}); }
   user.avatar = avatarUrl;
   saveDB(db);
@@ -487,15 +539,12 @@ app.post('/api/me/avatar', authMiddleware, upload.single('avatar'), async (req, 
   res.json({ avatar: avatarUrl || `/uploads/avatars/${user.avatar}` });
 });
 
-app.post('/api/me/banner', authMiddleware, upload.single('banner'), async (req, res) => {
+app.post('/api/me/banner', preMediaAuth, upload.single('banner'), stageImage, safetyGate, authMiddleware, async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'Файл не загружен' });
   db = loadDB();
   const user = db.users.find(u => u.id === req.user.id);
   if (!user) return res.status(404).json({ error: 'Не найден' });
-  let bannerUrl = null;
-  if (useCloudinary) {
-    bannerUrl = await uploadToCloudinary(req.file.path, 'image');
-  }
+  const bannerUrl = req.stagedImage;
   if (!bannerUrl) { try { fs.unlinkSync(req.file.path); } catch (_) {} return res.status(503).json({error:'media_storage_unavailable'}); }
   user.banner = bannerUrl;
   saveDB(db);
@@ -710,7 +759,7 @@ app.get('/api/users/:nickname/videos', (req, res) => {
 });
 
 // Upload - now supports video, image, gif, music + Cloudinary for free persistent storage without card
-app.post('/api/videos/upload', authMiddleware, upload.fields([{ name: 'video', maxCount: 1 }, { name: 'thumbnail', maxCount: 1 }, { name: 'cover', maxCount: 1 }, { name: 'content', maxCount: 1 }]), async (req, res) => {
+app.post('/api/videos/upload', preMediaAuth, upload.fields([{ name: 'video', maxCount: 1 }, { name: 'thumbnail', maxCount: 1 }, { name: 'cover', maxCount: 1 }, { name: 'content', maxCount: 1 }]), stageVideo, safetyGate, authMiddleware, async (req, res) => {
   const { title, description, contentType, tags, artist, album } = req.body;
   db = loadDB();
   const currentUser = db.users.find(u => u.id === req.user.id);
@@ -752,21 +801,8 @@ app.post('/api/videos/upload', authMiddleware, upload.fields([{ name: 'video', m
   const parsedTags = tags ? (typeof tags === 'string' ? tags.split(',').map(t=>t.trim()).filter(Boolean) : tags) : [];
 
   // Cloudinary upload for persistent storage free without card (25GB free, no card needed)
-  let cloudinaryUrl = null;
-  let cloudinaryThumbUrl = null;
-  if (useCloudinary) {
-    const resourceType = type==='image' || type==='gif' ? 'image' : 'video'; // Cloudinary: audio идёт как video
-    cloudinaryUrl = await uploadToCloudinary(file.path, resourceType);
-    if (!cloudinaryUrl) return res.status(503).json({error:'media_storage_unavailable'});
-    if (thumbFile) {
-      cloudinaryThumbUrl = await uploadToCloudinary(thumbFile.path, 'image');
-      if (!cloudinaryThumbUrl) return res.status(503).json({error:'media_storage_unavailable'});
-    }
-    if (coverFile && coverFile !== thumbFile) {
-      cloudinaryThumbUrl = await uploadToCloudinary(coverFile.path, 'image');
-      if (!cloudinaryThumbUrl) return res.status(503).json({error:'media_storage_unavailable'});
-    }
-  }
+  const cloudinaryUrl = req.stagedVideo;
+  const cloudinaryThumbUrl = req.stagedThumb;
 
   if (!cloudinaryUrl) return res.status(503).json({error:'media_storage_unavailable'});
 
@@ -1138,15 +1174,19 @@ app.get('*', (req, res) => {
 });
 
 (async () => {
-  // Never substitute an empty database when backup download or parsing fails.
-  const backup = await requireVerifiedBackup(backupStore);
+  // First import is for an isolated lab only. A real cutover must quiesce the
+  // old writer and verify its final backup before doing this exactly once.
+  let backup = await durableLedger.recover();
+  if (backup === null) {
+    backup = await requireVerifiedBackup(backupStore); await durableLedger.importOnce(backup);
+    dbRestoreState = 'imported';
+  } else dbRestoreState = 'ledger';
   const tmp = DB_PATH + '.restore-' + crypto.randomBytes(8).toString('hex');
   try { fs.writeFileSync(tmp, backup, {flag:'wx',mode:0o600}); fs.renameSync(tmp, DB_PATH); }
   finally { try { fs.unlinkSync(tmp); } catch (_) {} }
-  dbRestoreState = 'restored'; db = loadDB();
+  db = loadDB(); committedDb = validate(backup);
   // Failure of the new, isolated cloud router must not rewrite LOLTUBE data.
   try {
-    const {CloudinaryStore} = require('./gplus-cloud/cloudinary-store');
     const {CloudinaryRelayStore} = require('./glink-cloud/cloudinary-store');
     const {createCloudRouter} = require('./loltube-combined/cloud-router');
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'loltube-cloud-runtime-'));
