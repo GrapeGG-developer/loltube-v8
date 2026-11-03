@@ -1,19 +1,31 @@
 'use strict';
-/* Experimental G+ service assembly. Not enabled in production or deployable as
- * a release: the Cloudinary adapter has no provider-level linearizability SLA,
- * and remote media/ledger garbage collection is not implemented. */
+/* Experimental G+ service assembly. Not yet a production release: Cloudinary
+ * lacks a confirmed provider-level linearizability SLA, multi-instance fencing
+ * and old ledger-block garbage collection are not complete. */
 const path=require('node:path'),fs=require('node:fs/promises'),http=require('node:http'),crypto=require('node:crypto');
 const {Ledger}=require('./ledger'),{CloudFiles}=require('./cloud-files'),{snapshot,materialize}=require('./snapshot'),{createGateway}=require('./gateway');
 const {createGPlus}=require('./app/index');
-async function createCloudGPlus({store,dataDir,onFatal=()=>{},maxStorageBytes=5*1024**3,reserveBytes=256*1024**2,previewKey=null}){
- if(!path.isAbsolute(dataDir)||!store||!(previewKey===null||typeof previewKey==='string'&&/^[A-Za-z0-9_-]{32,128}$/.test(previewKey)))throw Error('invalid_cloud_service');
+async function createCloudGPlus({store,dataDir,onFatal=()=>{},maxStorageBytes=5*1024**3,reserveBytes=256*1024**2,previewKey=null,now=Date.now,retentionMs,cleanupIntervalMs=60000}){
+ if(!path.isAbsolute(dataDir)||!store||typeof now!=='function'||!Number.isInteger(cleanupIntervalMs)||cleanupIntervalMs<0||!(previewKey===null||typeof previewKey==='string'&&/^[A-Za-z0-9_-]{32,128}$/.test(previewKey)))throw Error('invalid_cloud_service');
  await fs.mkdir(dataDir,{recursive:true,mode:0o700});if((await fs.readdir(dataDir)).length)throw Error('runtime_directory_must_be_empty');
  const ledger=new Ledger(store),restored=await ledger.recover();await materialize(dataDir,restored.files);
- const media=new CloudFiles(store),app=createGPlus({dataDir,maxStorageBytes,reserveBytes,restoreAsset:(...a)=>media.restore(...a)});
- // Do not remove history or media until Cloudinary retention/GC is transactional.
+ const media=new CloudFiles(store),app=createGPlus({dataDir,maxStorageBytes,reserveBytes,restoreAsset:(...a)=>media.restore(...a),cloudManagedDeletion:true,now,...(retentionMs===undefined?{}:{retentionMs})});
+ // Local timers must not mutate SQLite outside the serialized durable gateway.
  app.setFrozen(true);
  const gateway=createGateway({ledger,backend:(req,res)=>app(req,res,()=>{res.writeHead(404,{'Content-Type':'application/json'});res.end('{"error":"not_found"}');}),
   snapshot:()=>snapshot(dataDir),publishAsset:(...a)=>media.publish(...a),dataDir,onFatal});
+ let gcTask=null;
+ async function cleanupOnce(){
+  if(gcTask)return {busy:true};
+  gcTask=gateway.maintenance(async checkpoint=>{
+   const id=app.prepareCloudDeletion();if(!id)return {removed:false};
+   await checkpoint(); // durable 'deleting' before any cloud object is removed
+   await media.remove(id);await app.finishCloudDeletion(id);await checkpoint();
+   return {removed:true};
+  });
+  try{return await gcTask;}finally{gcTask=null;}
+ }
+ const gcTimer=cleanupIntervalMs?setInterval(()=>{cleanupOnce().catch(()=>{});},cleanupIntervalMs):null;if(gcTimer)gcTimer.unref();
  function previewAllowed(req){
   if(previewKey===null)return true;
   const supplied=req.headers['x-gplus-preview-key'];if(typeof supplied!=='string'||supplied.length!==previewKey.length||!/^[A-Za-z0-9_-]+$/.test(supplied))return false;
@@ -32,7 +44,7 @@ async function createCloudGPlus({store,dataDir,onFatal=()=>{},maxStorageBytes=5*
    if(!app.handleUpgrade(req,socket,head))socket.destroy();
   }catch{socket.destroy();}
  });
- async function close(){app.closeCalls();await new Promise(resolve=>server.close(resolve));app.close();}
- return {server,app,gateway,ledger,close};
+ async function close(){if(gcTimer)clearInterval(gcTimer);app.closeCalls();await new Promise(resolve=>server.close(resolve));if(gcTask)try{await gcTask;}catch{}app.close();}
+ return {server,app,gateway,ledger,cleanupOnce,close};
 }
 module.exports={createCloudGPlus};

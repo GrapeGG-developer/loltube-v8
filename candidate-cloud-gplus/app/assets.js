@@ -11,8 +11,8 @@ function smallJson(req){return new Promise((resolve,reject)=>{let n=0,parts=[],f
  req.on('error',reject);req.on('aborted',()=>reject(Error('bad_body')));
 });}
 const DEFAULT_RETENTION_MS=30*24*60*60*1000;
-function createAssets({dataDir,authenticate,isMember,eventRecipients=()=>null,maxStorageBytes=0,reserveBytes=0,now=Date.now,retentionMs=DEFAULT_RETENTION_MS,restoreAsset=null}){
- if(!path.isAbsolute(dataDir)||typeof authenticate!=='function'||typeof isMember!=='function'||typeof eventRecipients!=='function'||typeof now!=='function')throw Error('invalid asset configuration');
+function createAssets({dataDir,authenticate,isMember,eventRecipients=()=>null,maxStorageBytes=0,reserveBytes=0,now=Date.now,retentionMs=DEFAULT_RETENTION_MS,restoreAsset=null,cloudManagedDeletion=false}){
+ if(!path.isAbsolute(dataDir)||typeof authenticate!=='function'||typeof isMember!=='function'||typeof eventRecipients!=='function'||typeof now!=='function'||typeof cloudManagedDeletion!=='boolean')throw Error('invalid asset configuration');
  if(!Number.isSafeInteger(maxStorageBytes)||maxStorageBytes<0||!Number.isSafeInteger(reserveBytes)||reserveBytes<0||!Number.isSafeInteger(retentionMs)||retentionMs<1)throw Error('invalid asset limits');
  const dir=path.join(dataDir,'encrypted-assets');fs.mkdirSync(dir,{recursive:true,mode:0o700});
  const db=new Database(path.join(dataDir,'gplus-assets.sqlite3'));db.pragma('journal_mode = WAL');db.pragma('synchronous = FULL');db.pragma('foreign_keys = ON');
@@ -36,7 +36,7 @@ function createAssets({dataDir,authenticate,isMember,eventRecipients=()=>null,ma
  }
  // A crash may occur after marking a file for deletion. Revalidate all receipts
  // and the deadline before completing; otherwise return the row to service.
- for(const a of db.prepare("SELECT id FROM assets WHERE state='deleting'").all()){
+ if(!cloudManagedDeletion)for(const a of db.prepare("SELECT id FROM assets WHERE state='deleting'").all()){
   if(!P.validEvent(a.id))throw Error('invalid_asset_id_in_store');
   let removed=false;
   if(eligibleAt(a.id,now()))try{fs.unlinkSync(path.join(dir,a.id+'.bin'));removed=true;}catch(e){if(e.code==='ENOENT')removed=true;}
@@ -52,7 +52,7 @@ function createAssets({dataDir,authenticate,isMember,eventRecipients=()=>null,ma
  const reserve=db.transaction((id,chat,owner,size,sha)=>{
   const old=db.prepare('SELECT * FROM assets WHERE id=?').get(id);
   if(old){if(old.state==='complete'&&old.chat===chat&&old.owner===owner&&old.size===size&&old.sha===sha)return 'already';return 'conflict';}
-  const used=db.prepare('SELECT COALESCE(SUM(size),0) AS n FROM assets').get().n;
+  const used=db.prepare("SELECT COALESCE(SUM(size),0) AS n FROM assets WHERE state!='tombstone'").get().n;
   if(maxStorageBytes===0||used+size>maxStorageBytes)return 'full';
   const stat=fs.statfsSync(dir);if(Number(stat.bavail)*Number(stat.bsize)<size+reserveBytes)return 'full';
   db.prepare("INSERT INTO assets(id,chat,owner,size,sha,state,created) VALUES(?,?,?,?,?,'uploading',?)").run(id,chat,owner,size,sha,now());return 'new';
@@ -130,7 +130,29 @@ function createAssets({dataDir,authenticate,isMember,eventRecipients=()=>null,ma
   }catch(e){try{await fsp.unlink(temp);}catch{}try{await fsp.unlink(final);}catch{}db.prepare("DELETE FROM assets WHERE id=? AND state='uploading'").run(id);return reply(res,400,{error:e.message==='bad_upload'?'invalid_digest':'upload_failed'});}
   finally{activeUploads--;}
  };
+ // These hooks are called only by the serialized Cloudinary gateway, not from
+ // the normal timer. A persisted 'deleting' row survives every restart.
+ api.prepareCloudDeletion=()=>{
+  if(!cloudManagedDeletion)throw Error('cloud_deletion_not_enabled');const t=now();if(!Number.isSafeInteger(t)||t<=0)return null;
+  const pending=db.prepare("SELECT id FROM assets WHERE state='deleting' ORDER BY id").all();
+  for(const row of pending){if(!P.validEvent(row.id))throw Error('invalid_asset_id_in_store');if(!readers.has(row.id)&&eligibleAt(row.id,t))return row.id;}
+  const candidates=db.prepare(`SELECT a.id,MAX(r.received) AS last FROM assets a
+   JOIN asset_bindings b ON b.asset_id=a.id JOIN asset_receipts r ON r.asset_id=a.id
+   WHERE a.state='complete' GROUP BY a.id HAVING MIN(r.received)>0 AND MAX(r.received)<=?
+   ORDER BY last,a.id LIMIT 64`).all(t-retentionMs);
+  for(const row of candidates){if(!P.validEvent(row.id))throw Error('invalid_asset_id_in_store');if(readers.has(row.id)||!eligibleAt(row.id,t))continue;
+   if(db.prepare("UPDATE assets SET state='deleting' WHERE id=? AND state='complete'").run(row.id).changes)return row.id;}
+  return null;
+ };
+ api.finishCloudDeletion=async(id)=>{
+  if(!cloudManagedDeletion||!P.validEvent(id))throw Error('invalid_cloud_deletion');
+  const t=now(),row=db.prepare("SELECT id FROM assets WHERE id=? AND state='deleting'").get(id);
+  if(!row||readers.has(id)||!eligibleAt(id,t))throw Error('cloud_deletion_not_ready');
+  try{await fsp.unlink(path.join(dir,id+'.bin'));}catch(e){if(e.code!=='ENOENT')throw e;}
+  if(!db.prepare("UPDATE assets SET state='tombstone' WHERE id=? AND state='deleting'").run(id).changes)throw Error('cloud_deletion_conflict');
+ };
  api.purgeDelivered=async(limit=64)=>{
+  if(cloudManagedDeletion)throw Error('cloud_deletion_requires_gateway');
   if(!Number.isSafeInteger(limit)||limit<1||limit>1024)throw Error('invalid_sweep_limit');
   if(activeSweeps)return 0;activeSweeps++;
   let removed=0;

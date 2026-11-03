@@ -1,10 +1,10 @@
 'use strict';
 const {createAuth}=require('./auth');const {createMessages}=require('./messages');const {createAssets}=require('./assets');const {createCallRelay}=require('./call-relay');
 /** Mount before body parsers and SPA fallback. Single process only. */
-function createGPlus({dataDir,maxStorageBytes=0,reserveBytes=0,restoreAsset=null}={}){
- const auth=createAuth({dataDir});
- const messages=createMessages({dataDir,authenticate:auth.authenticate,lookup:auth.lookup});
- const assets=createAssets({dataDir,authenticate:auth.authenticate,isMember:messages.isMember,eventRecipients:messages.assetRecipients,maxStorageBytes,reserveBytes,restoreAsset});
+function createGPlus({dataDir,maxStorageBytes=0,reserveBytes=0,restoreAsset=null,cloudManagedDeletion=false,now=Date.now,retentionMs}={}){
+ const auth=createAuth({dataDir,now});
+ const messages=createMessages({dataDir,authenticate:auth.authenticate,lookup:auth.lookup,now});
+ const assets=createAssets({dataDir,authenticate:auth.authenticate,isMember:messages.isMember,eventRecipients:messages.assetRecipients,maxStorageBytes,reserveBytes,restoreAsset,cloudManagedDeletion,now,...(retentionMs===undefined?{}:{retentionMs})});
  const calls=createCallRelay({authenticate:auth.authenticate,isDirectMember:messages.isDirectMember});
  let sweepSuspended=false;
  // Message TTL is explicit; media cleanup requires a binding to a signed event
@@ -24,6 +24,7 @@ function createGPlus({dataDir,maxStorageBytes=0,reserveBytes=0,restoreAsset=null
  handler.pendingOperations=()=>activeOperations+assets.pendingWrites();
  handler.setFrozen=value=>{sweepSuspended=!!value;};
  handler.purgeDelivered=()=>assets.purgeDelivered();
+ handler.prepareCloudDeletion=()=>assets.prepareCloudDeletion();handler.finishCloudDeletion=id=>assets.finishCloudDeletion(id);
  handler.handleUpgrade=calls.handleUpgrade;handler.closeCalls=()=>calls.close();
  handler.close=()=>{clearInterval(sweep);calls.close();assets.close();messages.close();};return handler;
 }

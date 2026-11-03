@@ -10,7 +10,7 @@ class CloudinaryStore {
   this.cloud=cloudinary;this.prefix=prefix;this.fetch=fetchImpl;this.timeoutMs=timeoutMs;
  }
  _id(name) {
-  if(typeof name!=='string'||!/^((?:revisions\/[0-9]{16}|blocks\/[0-9a-f]{64}|assets\/[A-Za-z0-9_-]{22}\/index)\.json|head\.json)$/.test(name))throw Error('invalid_cloud_object');
+  if(typeof name!=='string'||!/^((?:revisions\/[0-9]{16}|blocks\/[0-9a-f]{64}|assets\/[A-Za-z0-9_-]{22}\/index|assets\/[A-Za-z0-9_-]{22}\/blocks\/[0-9]{6}-[0-9a-f]{64})\.json|head\.json)$/.test(name))throw Error('invalid_cloud_object');
   return this.prefix+'/'+name;
  }
  async get(name) {
@@ -35,5 +35,11 @@ class CloudinaryStore {
  }
  async putOnce(name,data) { return this._upload(name,data,false); }
  async setHead(data) { await this._upload('head.json',data,true); }
+ async removeMany(names) {
+  if(!this.cloud.api||typeof this.cloud.api.delete_resources!=='function'||!Array.isArray(names)||names.length<1||names.length>100||names.some(n=>!/^assets\/[A-Za-z0-9_-]{22}\/blocks\/[0-9]{6}-[0-9a-f]{64}\.json$/.test(n)))throw Error('invalid_cloud_delete');
+  const ids=names.map(n=>this._id(n));if(new Set(ids).size!==ids.length)throw Error('invalid_cloud_delete');
+  let out;try{out=await this.cloud.api.delete_resources(ids,{resource_type:'raw',type:'authenticated',invalidate:false});}catch{throw Error('cloud_delete_failed');}
+  if(!out||!out.deleted||typeof out.deleted!=='object'||ids.some(id=>!['deleted','not_found','not found'].includes(out.deleted[id])))throw Error('cloud_delete_failed');
+ }
 }
 module.exports={CloudinaryStore};
