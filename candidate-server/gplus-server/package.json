@@ -1,0 +1,16 @@
+{
+  "name": "grapescript-gplus-server",
+  "version": "0.2.0",
+  "private": true,
+  "description": "G+ authentication and encrypted relay for development",
+  "engines": {
+    "node": ">=22 <27"
+  },
+  "scripts": {
+    "test": "node --test *.test.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "12.11.1",
+    "ws": "8.22.1"
+  }
+}
