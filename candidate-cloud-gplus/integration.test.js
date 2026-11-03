@@ -3,7 +3,7 @@ const {test}=require('node:test'),assert=require('node:assert/strict'),fs=requir
 const {createCloudGPlus}=require('./bootstrap'),P=require('./app/protocol');
 class Store{constructor(){this.m=new Map()}async get(k){return this.m.has(k)?Buffer.from(this.m.get(k)):null}async putOnce(k,v){if(this.m.has(k))return false;this.m.set(k,Buffer.from(v));return true}async setHead(v){this.m.set('head.json',Buffer.from(v))}}
 function identity(){const {publicKey,privateKey}=crypto.generateKeyPairSync('ec',{namedCurve:'prime256v1'});const der=publicKey.export({type:'spki',format:'der'});return {id:P.id(der),key:der.toString('base64url'),priv:privateKey};}
-async function start(store,root,name){const service=await createCloudGPlus({store,dataDir:path.join(root,name),reserveBytes:0,maxStorageBytes:50*1024*1024});await new Promise(r=>service.server.listen(0,'127.0.0.1',r));service.base='http://127.0.0.1:'+service.server.address().port+'/gsrv-v1';return service;}
+async function start(store,root,name,previewKey=null){const service=await createCloudGPlus({store,dataDir:path.join(root,name),reserveBytes:0,maxStorageBytes:50*1024*1024,previewKey});await new Promise(r=>service.server.listen(0,'127.0.0.1',r));service.base='http://127.0.0.1:'+service.server.address().port+'/gsrv-v1';return service;}
 async function call(s,method,url,body,token,extra={}){const raw=Buffer.isBuffer(body);const response=await fetch(s.base+url,{method,headers:{...(body===undefined?{}:{'Content-Type':raw?'application/octet-stream':'application/json'}),...(token?{Authorization:'Bearer '+token}:{}),...extra},...(body===undefined?{}:{body:raw?body:JSON.stringify(body)})});const data=await response.arrayBuffer();return {status:response.status,bytes:Buffer.from(data),json:()=>JSON.parse(Buffer.from(data).toString())};}
 async function login(s,d,nickname){
  const c=await call(s,'POST','/gplus/auth/challenge',{public_key:d.key});assert.equal(c.status,200);const nonce=c.json().nonce;
@@ -28,4 +28,12 @@ test('real G+ registration, encrypted message, media and restart recover from im
  // Server sessions and private identity keys must not be included in snapshots.
  const joined=Buffer.concat([...store.m.values()]);assert.equal(joined.includes(Buffer.from(a.token)),false);assert.equal(joined.includes(Buffer.from('PRIVATE KEY')),false);
  await s.close();
+});
+
+test('isolated preview rejects unapproved requests but health remains visible',async(t)=>{
+ const root=await fs.mkdtemp(path.join(os.tmpdir(),'gplus-cloud-preview-'));t.after(()=>fs.rm(root,{recursive:true,force:true}));
+ const key=crypto.randomBytes(32).toString('base64url'),s=await start(new Store(),root,'runtime',key);t.after(()=>s.server.close());
+ let r=await fetch(s.base+'/gplus/me');assert.equal(r.status,403);
+ r=await fetch(s.base+'/gplus/me',{headers:{'X-GPlus-Preview-Key':key}});assert.equal(r.status,401);
+ r=await fetch(s.base.replace('/gsrv-v1','')+'/health');assert.equal(r.status,200);await s.close();
 });
